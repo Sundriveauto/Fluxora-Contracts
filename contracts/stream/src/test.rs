@@ -8597,7 +8597,10 @@ fn test_withdraw_to_on_cancelled_stream_delivers_accrued() {
     // Recipient redirects their accrued share to a cold wallet
     let amount = ctx.client().withdraw_to(&stream_id, &destination);
 
-    assert_eq!(amount, 400, "accrued amount must be delivered to destination");
+    assert_eq!(
+        amount, 400,
+        "accrued amount must be delivered to destination"
+    );
     assert_eq!(ctx.token().balance(&destination), 400);
     assert_eq!(ctx.token().balance(&ctx.recipient), 0);
 
