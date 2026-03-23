@@ -272,15 +272,21 @@ Emitted when a recipient successfully withdraws tokens via `withdraw`.
 
 #### Other Events
 
-| Topic                      | Payload                                  | When Emitted                               |
-| -------------------------- | ---------------------------------------- | ------------------------------------------ |
-| `("created", stream_id)`   | `StreamCreated` (struct payload)         | `create_stream`                            |
-| `("paused", stream_id)`    | `StreamEvent::Paused(stream_id)`         | `pause_stream` / `pause_stream_as_admin`   |
-| `("resumed", stream_id)`   | `StreamEvent::Resumed(stream_id)`        | `resume_stream` / `resume_stream_as_admin` |
-| `("cancelled", stream_id)` | `StreamEvent::Cancelled(stream_id)`      | `cancel_stream` / `cancel_stream_as_admin` |
-| `("withdrew", stream_id)`  | `withdrawable` (i128)                    | `withdraw`                                 |
-| `("closed", stream_id)`    | `StreamEvent::StreamClosed(stream_id)`   | `close_completed_stream`                   |
-| `("top_up", stream_id)`    | `StreamToppedUp` (struct payload)        | `top_up_stream`                            |
+| Topic                      | Payload                                                                                      | When Emitted                                                                                 |
+| -------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `("created", stream_id)`   | `StreamCreated` (struct payload)                                                             | `create_stream` / `create_streams`                                                           |
+| `("paused", stream_id)`    | `StreamEvent::Paused(stream_id)`                                                             | `pause_stream` / `pause_stream_as_admin`                                                     |
+| `("resumed", stream_id)`   | `StreamEvent::Resumed(stream_id)`                                                            | `resume_stream` / `resume_stream_as_admin`                                                   |
+| `("cancelled", stream_id)` | `StreamEvent::StreamCancelled(stream_id)`                                                    | `cancel_stream` / `cancel_stream_as_admin`                                                   |
+| `("withdrew", stream_id)`  | `Withdrawal { stream_id, recipient, amount }`                                                | `withdraw` / `batch_withdraw` — only when `amount > 0`                                       |
+| `("wdraw_to", stream_id)`  | `WithdrawalTo { stream_id, recipient, destination, amount }`                                 | `withdraw_to` — only when `amount > 0`. `recipient` is the authorizing caller; `destination` is where tokens were sent. |
+| `("completed", stream_id)` | `StreamEvent::StreamCompleted(stream_id)`                                                    | Emitted after `withdrew` or `wdraw_to` when `withdrawn_amount == deposit_amount`             |
+| `("closed", stream_id)`    | `StreamEvent::StreamClosed(stream_id)`                                                       | `close_completed_stream`                                                                     |
+| `("top_up", stream_id)`    | `StreamToppedUp { stream_id, top_up_amount, new_deposit_amount }`                            | `top_up_stream`                                                                              |
+| `("rate_upd", stream_id)`  | `RateUpdated { stream_id, old_rate_per_second, new_rate_per_second, effective_time }`        | `update_rate_per_second`                                                                     |
+| `("end_shrt", stream_id)`  | `StreamEndShortened { stream_id, old_end_time, new_end_time, refund_amount }`                | `shorten_stream_end_time`                                                                    |
+| `("end_ext", stream_id)`   | `StreamEndExtended { stream_id, old_end_time, new_end_time }`                                | `extend_stream_end_time`                                                                     |
+| `["AdminUpdated"]`         | `(old_admin: Address, new_admin: Address)`                                                   | `set_admin`                                                                                  |
 
 ---
 
@@ -309,8 +315,9 @@ errors relevant to stream creation and timing.
 | `"stream is completed"`                                                 | `resume_stream`                            | Resume completed             |
 | `"stream is cancelled"`                                                 | `resume_stream`                            | Resume cancelled             |
 | `"stream must be active or paused to cancel"`                           | `cancel_stream` / `cancel_stream_as_admin` | Cancel completed/cancelled   |
-| `"stream already completed"`                                            | `withdraw`                                 | Withdraw from completed      |
-| `"cannot withdraw from paused stream"`                                  | `withdraw`                                 | Withdraw while paused        |
+| `"stream already completed"`                                            | `withdraw` / `withdraw_to`                 | Withdraw from completed      |
+| `"cannot withdraw from paused stream"`                                  | `withdraw` / `withdraw_to`                 | Withdraw while paused        |
+| `"destination must not be the contract"`                                | `withdraw_to`                              | destination == contract addr |
 | `"nothing to withdraw"`                                                 | `withdraw`                                 | accrued == withdrawn_amount  |
 | `"stream is not active"`                                                | `pause_stream_as_admin`                    | Admin pause non-active       |
 | `"stream is not paused"`                                                | `resume_stream_as_admin`                   | Admin resume non-paused      |
