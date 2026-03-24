@@ -26,27 +26,30 @@ Notes:
 
 Soroban events are represented as JSON in test snapshots; the general shape is:
 
-- topics: array of topic items (symbols or values)
-- data: a value (single item) which can be a primitive (i128/u64) or a tuple/contracttype
-
-Examples below are taken from the contract's test environment and use the same
-field names and types the contract publishes.
+- **topics**: array of topic items (symbols or values)
+- **data**: a value (single item) which can be a primitive, a struct, or a tuple
 
 ### 1) StreamCreated
 
-- topics: ["created", <stream_id>]  // stream_id: u64
-- data: StreamCreated struct:
-  - stream_id: u64
-  - sender: Address
-  - recipient: Address
-  - deposit_amount: i128
-  - rate_per_second: i128
-  - start_time: u64
-  - cliff_time: u64
-  - end_time: u64
+Emitted by `persist_new_stream` after a successful `create_stream` or `create_streams` call.
+
+```
+topics: ["created", <stream_id: u64>]
+data:   StreamCreated {
+          stream_id:       u64,
+          sender:          Address,
+          recipient:       Address,
+          deposit_amount:  i128,
+          rate_per_second: i128,
+          start_time:      u64,
+          cliff_time:      u64,
+          end_time:        u64,
+        }
+```
 
 Example JSON (illustrative):
 
+```json
 {
   "topics": ["created", 0],
   "data": {
@@ -60,89 +63,170 @@ Example JSON (illustrative):
     "end_time": 1000
   }
 }
-
-In Soroban test snapshots the raw event object appears as:
-
-{
-  "event": {
-    "topics": ["created", 0],
-    "data": {
-      "stream_id": 0,
-      "sender": "G...SENDER...",
-      "recipient": "G...RECIPIENT...",
-      "deposit_amount": 1000,
-      "rate_per_second": 1,
-      "start_time": 0,
-      "cliff_time": 0,
-      "end_time": 1000
-    }
-  }
-}
+```
 
 ### 2) Withdrawal
 
-- topics: ["withdrew", <stream_id>]  // stream_id: u64
-- data: <withdraw_amount>             // i128
+Emitted by `withdraw` and each stream in `batch_withdraw` when `withdrawable > 0`.
+
+```
+topics: ["withdrew", <stream_id: u64>]
+data:   Withdrawal {
+          stream_id: u64,
+          recipient: Address,
+          amount:    i128,
+        }
+```
 
 Example:
 
+```json
 {
   "topics": ["withdrew", 0],
-  "data": 300
+  "data": { "stream_id": 0, "recipient": "G...RECIPIENT...", "amount": 300 }
 }
+```
 
-### 3) StreamPaused / StreamResumed / StreamCancelled
+### 3) WithdrawalTo
 
-- topics: ["paused"|"resumed"|"cancelled", <stream_id>]  // stream_id: u64
-- data: StreamEvent enum value which wraps the stream_id. The enum in the
-  contract is defined as:
+Emitted by `withdraw_to` when `withdrawable > 0`. The `destination` field holds the
+address that actually receives the tokens; `recipient` is the stream's registered
+recipient (the authorised caller).
+
+```
+topics: ["wdraw_to", <stream_id: u64>]
+data:   WithdrawalTo {
+          stream_id:   u64,
+          recipient:   Address,
+          destination: Address,
+          amount:      i128,
+        }
+```
+
+### 4) StreamPaused / StreamResumed / StreamCancelled / StreamCompleted / StreamClosed
+
+These all use the `StreamEvent` enum as their data payload:
 
 ```rust
 #[contracttype]
-#[derive(Clone, Debug)]
 pub enum StreamEvent {
     Paused(u64),
     Resumed(u64),
     StreamCancelled(u64),
+    StreamCompleted(u64),
+    StreamClosed(u64),
 }
 ```
 
-Example (paused):
+| Function(s)                                  | Topic          | Data enum variant              |
+|----------------------------------------------|----------------|--------------------------------|
+| `pause_stream`, `pause_stream_as_admin`      | `"paused"`     | `StreamEvent::Paused(id)`      |
+| `resume_stream`, `resume_stream_as_admin`    | `"resumed"`    | `StreamEvent::Resumed(id)`     |
+| `cancel_stream`, `cancel_stream_as_admin`    | `"cancelled"`  | `StreamEvent::StreamCancelled(id)` |
+| `withdraw`, `batch_withdraw` (final drain)   | `"completed"`  | `StreamEvent::StreamCompleted(id)` |
+| `close_completed_stream`                     | `"closed"`     | `StreamEvent::StreamClosed(id)` |
 
+Example (cancelled):
+
+```json
 {
-  "topics": ["paused", 0],
-  "data": { "Paused": 0 }
+  "topics": ["cancelled", 0],
+  "data": { "StreamCancelled": 0 }
 }
+```
 
-Indexers should accept either an enum-wrapped object (as above) or simply read
-the topics for the stream id and treat the data as the same u64 id. The contract
-always publishes the stream id both as the second topic and inside the enum payload.
+Example (completed — emitted after the Withdrawal event on the same call):
 
-### 4) AdminUpdated
-
-- topics: ["admin", "updated"]  // both symbols
-- data: (old_admin: Address, new_admin: Address)
-
-Example (illustrative):
-
+```json
 {
-  "topics": ["admin", "updated"],
+  "topics": ["completed", 0],
+  "data": { "StreamCompleted": 0 }
+}
+```
+
+> **Indexers:** the `stream_id` appears both as the second topic and inside the
+> enum payload. Read it from the topic for efficiency; use the payload only for
+> cross-checking.
+
+### 5) RateUpdated
+
+```
+topics: ["rate_upd", <stream_id: u64>]
+data:   RateUpdated {
+          stream_id:           u64,
+          old_rate_per_second: i128,
+          new_rate_per_second: i128,
+          effective_time:      u64,
+        }
+```
+
+### 6) StreamEndShortened
+
+```
+topics: ["end_shrt", <stream_id: u64>]
+data:   StreamEndShortened {
+          stream_id:     u64,
+          old_end_time:  u64,
+          new_end_time:  u64,
+          refund_amount: i128,
+        }
+```
+
+### 7) StreamEndExtended
+
+```
+topics: ["end_ext", <stream_id: u64>]
+data:   StreamEndExtended {
+          stream_id:    u64,
+          old_end_time: u64,
+          new_end_time: u64,
+        }
+```
+
+### 8) StreamToppedUp
+
+```
+topics: ["top_up", <stream_id: u64>]
+data:   StreamToppedUp {
+          stream_id:          u64,
+          top_up_amount:      i128,
+          new_deposit_amount: i128,
+        }
+```
+
+### 9) AdminUpdated
+
+Emitted by `set_admin`.
+
+```
+topics: ["AdminUpdated"]
+data:   (old_admin: Address, new_admin: Address)
+```
+
+Example:
+
+```json
+{
+  "topics": ["AdminUpdated"],
   "data": ["G...OLD_ADDRESS...", "G...NEW_ADDRESS..."]
 }
+```
 
-Addresses are Soroban `Address` values and appear as their string representation
-in test JSON (Stellar-like or contract address string). Indexers should parse
-them using the same Address decoding used elsewhere in the backend.
+---
 
 ## Parsing recommendations for indexers
 
-- Use topics to quickly filter events by type and stream id: topics[0] is the
-  canonical event name symbol ("created", "withdrew", "paused", "resumed", "cancelled", "admin").
-- For stream-level events prefer reading stream id from topics[1] (u64) rather
-  than relying solely on decoding the enum in `data` (redundant).
-- For `created` and `withdrew` events, `data` is a signed 128-bit integer
-  (`i128`): parse using a big-int library supporting 128-bit signed integers.
-- For admin updates, `data` is a 2-tuple of `Address` values: parse as addresses.
+- Use `topics[0]` to filter by event type; use `topics[1]` to get the `stream_id`
+  for all stream-level events.
+- For `Withdrawal` and `WithdrawalTo`, the `amount` field is `i128` — use a
+  big-int library that supports 128-bit signed integers.
+- `StreamCompleted` is always emitted on the **same call** as the final
+  `Withdrawal` that drains the stream. Expect both events in the same transaction.
+- `StreamClosed` signals that the stream's on-chain storage has been removed.
+  After this event, `get_stream_state` returns `StreamNotFound` for that ID.
+- `AdminUpdated` has a single-element topic list (no stream_id).
+
+---
 
 ## Keeping this doc in sync
 
@@ -160,3 +244,21 @@ document to match and include example snapshots.
 
 ---
 Commit message suggestion: `docs: add event schema and topics for indexers`
+| Source location                                              | Symbol emitted  |
+|--------------------------------------------------------------|-----------------|
+| `persist_new_stream`                                         | `"created"`     |
+| `withdraw`, `batch_withdraw`                                 | `"withdrew"`    |
+| `withdraw_to`                                                | `"wdraw_to"`    |
+| `withdraw`, `batch_withdraw` (completion)                    | `"completed"`   |
+| `pause_stream`, `pause_stream_as_admin`                      | `"paused"`      |
+| `resume_stream`, `resume_stream_as_admin`                    | `"resumed"`     |
+| `cancel_stream`, `cancel_stream_as_admin`                    | `"cancelled"`   |
+| `close_completed_stream`                                     | `"closed"`      |
+| `update_rate_per_second`                                     | `"rate_upd"`    |
+| `shorten_stream_end_time`                                    | `"end_shrt"`    |
+| `extend_stream_end_time`                                     | `"end_ext"`     |
+| `top_up_stream`                                              | `"top_up"`      |
+| `set_admin`                                                  | `"AdminUpdated"`|
+
+If you change event topics or payloads in the contract, update this document and
+include updated example snapshots in the PR.
