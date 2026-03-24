@@ -19,7 +19,7 @@ Notes:
 | Withdrawal | ["withdrew", stream_id] | withdraw_amount: i128 | When a recipient successfully withdraws accrued tokens. Only emitted when amount > 0.
 | StreamPaused | ["paused", stream_id] | StreamEvent::Paused(stream_id) — enum wrapper containing the u64 stream id | When a stream is paused by the sender or admin.
 | StreamResumed | ["resumed", stream_id] | StreamEvent::Resumed(stream_id) — enum wrapper containing the u64 stream id | When a paused stream is resumed by the sender or admin.
-| StreamCancelled | ["cancelled", stream_id] | StreamEvent::Cancelled(stream_id) — enum wrapper containing the u64 stream id | When a stream is cancelled by the sender or admin.
+| StreamCancelled | ["cancelled", stream_id] | StreamEvent::StreamCancelled(stream_id) — enum wrapper containing the u64 stream id | When a stream is cancelled by the sender or admin.
 | AdminUpdated | ["admin", "updated"] | (old_admin: Address, new_admin: Address) | When contract admin is rotated via `set_admin`.
 
 ## Exact Soroban event structure
@@ -103,7 +103,7 @@ Example:
 pub enum StreamEvent {
     Paused(u64),
     Resumed(u64),
-    Cancelled(u64),
+    StreamCancelled(u64),
 }
 ```
 
@@ -148,11 +148,11 @@ them using the same Address decoding used elsewhere in the backend.
 
 This file is derived from `contracts/stream/src/lib.rs` emit calls:
 
-- `persist_new_stream` publishes `(symbol_short!("created"), stream_id), deposit_amount`
+- `persist_new_stream` publishes `(symbol_short!("created"), stream_id), StreamCreated { ... }`
 - `withdraw` publishes `(symbol_short!("withdrew"), stream_id), withdrawable`
 - `pause_stream` / `pause_stream_as_admin` publish `(symbol_short!("paused"), stream_id), StreamEvent::Paused(stream_id)`
 - `resume_stream` / `resume_stream_as_admin` publish `(symbol_short!("resumed"), stream_id), StreamEvent::Resumed(stream_id)`
-- `cancel_stream` / `cancel_stream_as_admin` publish `(symbol_short!("cancelled"), stream_id), StreamEvent::Cancelled(stream_id)`
+- `cancel_stream` / `cancel_stream_as_admin` publish `(symbol_short!("cancelled"), stream_id), StreamEvent::StreamCancelled(stream_id)`
 - `set_admin` publishes `(symbol_short!("admin"), symbol_short!("updated")), (old_admin, new_admin)`
 
 If you change event topics or payloads in the contract, please update this
