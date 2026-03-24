@@ -5,7 +5,7 @@ use soroban_sdk::log;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Env, IntoVal,
+    vec, Address, Env, FromVal, IntoVal,
 };
 
 struct TestContext<'a> {
@@ -578,6 +578,42 @@ fn withdraw_marks_completed_when_fully_withdrawn() {
 }
 
 #[test]
+fn withdraw_final_drain_emits_withdrew_then_completed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Partial then final withdrawal.
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().withdraw(&stream_id);
+
+    ctx.env.ledger().set_timestamp(1000);
+    let events_before = ctx.env.events().all().len();
+    let amount = ctx.client().withdraw(&stream_id);
+    assert_eq!(amount, 700);
+
+    let events = ctx.env.events().all();
+    let mut withdrew_idx: Option<u32> = None;
+    let mut completed_idx: Option<u32> = None;
+    for i in events_before..events.len() {
+        let event = events.get(i).unwrap();
+        if event.0 != ctx.contract_id {
+            continue;
+        }
+        let topic0 = soroban_sdk::Symbol::from_val(&ctx.env, &event.1.get(0).unwrap());
+        if topic0 == soroban_sdk::Symbol::new(&ctx.env, "withdrew") {
+            withdrew_idx = Some(i);
+        }
+        if topic0 == soroban_sdk::Symbol::new(&ctx.env, "completed") {
+            completed_idx = Some(i);
+        }
+    }
+
+    assert!(withdrew_idx.is_some(), "expected withdrew event");
+    assert!(completed_idx.is_some(), "expected completed event");
+    assert!(withdrew_idx.unwrap() < completed_idx.unwrap());
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract")]
 fn cancel_completed_stream_panics() {
     let ctx = TestContext::setup();
@@ -613,6 +649,41 @@ fn withdraw_from_paused_stream_panics() {
     ctx.env.ledger().set_timestamp(500);
     ctx.client().pause_stream(&stream_id);
     ctx.client().withdraw(&stream_id);
+}
+
+#[test]
+fn withdraw_after_cancel_at_end_stays_cancelled() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Cancel at end: recipient can still withdraw accrued, but state must remain Cancelled.
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().cancel_stream(&stream_id);
+
+    let events_before = ctx.env.events().all().len();
+    let amount = ctx.client().withdraw(&stream_id);
+    assert_eq!(amount, 1000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.withdrawn_amount, 1000);
+
+    let events = ctx.env.events().all();
+    let mut saw_completed = false;
+    for i in events_before..events.len() {
+        let event = events.get(i).unwrap();
+        if event.0 != ctx.contract_id {
+            continue;
+        }
+        let topic0 = soroban_sdk::Symbol::from_val(&ctx.env, &event.1.get(0).unwrap());
+        if topic0 == soroban_sdk::Symbol::new(&ctx.env, "completed") {
+            saw_completed = true;
+        }
+    }
+    assert!(
+        !saw_completed,
+        "cancelled stream withdraw must not emit completed"
+    );
 }
 
 /// End-to-end integration test: create stream, advance time in steps,

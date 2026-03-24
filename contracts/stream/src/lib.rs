@@ -960,7 +960,8 @@ impl FluxoraStream {
     ///
     /// # State Changes
     /// - Updates `withdrawn_amount` by the amount transferred (only if withdrawable > 0)
-    /// - Sets status to `Completed` if all deposited tokens are withdrawn
+    /// - Sets status to `Completed` only when withdrawing from an `Active` stream and all
+    ///   deposited tokens are withdrawn
     /// - Extends stream storage TTL to prevent expiration
     ///
     /// # Events
@@ -972,7 +973,8 @@ impl FluxoraStream {
     /// - Before cliff time, accrued amount is 0 (returns 0, no transfer)
     /// - After end_time, accrued amount is capped at deposit_amount
     /// - Works on `Active` and `Cancelled` streams, not on `Paused` or `Completed`
-    /// - For cancelled streams, only the accrued amount (not refunded) can be withdrawn
+    /// - For cancelled streams, only the accrued amount (not refunded) can be withdrawn,
+    ///   and status remains `Cancelled` (no `Completed` transition)
     ///
     /// # Examples
     /// - Stream: 1000 tokens over 1000 seconds (1 token/sec)
@@ -1010,7 +1012,8 @@ impl FluxoraStream {
         // CEI: update state before external token transfer to reduce reentrancy risk.
         // Assumption: the token contract does not reenter this contract.
         stream.withdrawn_amount += withdrawable;
-        let completed_now = stream.withdrawn_amount == stream.deposit_amount;
+        let completed_now = stream.status == StreamStatus::Active
+            && stream.withdrawn_amount == stream.deposit_amount;
         if completed_now {
             stream.status = StreamStatus::Completed;
         }
@@ -1092,7 +1095,8 @@ impl FluxoraStream {
         }
 
         stream.withdrawn_amount += withdrawable;
-        let completed_now = stream.withdrawn_amount == stream.deposit_amount;
+        let completed_now = stream.status == StreamStatus::Active
+            && stream.withdrawn_amount == stream.deposit_amount;
         if completed_now {
             stream.status = StreamStatus::Completed;
         }
@@ -1125,7 +1129,7 @@ impl FluxoraStream {
     /// The caller must be the recipient of every stream in `stream_ids`. Each stream
     /// is processed in order: same validation and accounting as `withdraw`. Events
     /// are emitted per stream. The operation is atomic: if any stream fails
-    /// (e.g. not found, not recipient's, completed, or paused), the entire call panics
+    /// (e.g. not found, not recipient's, or paused), the entire call panics
     /// and no state changes or transfers occur.
     ///
     /// # Parameters
@@ -1140,7 +1144,8 @@ impl FluxoraStream {
     ///
     /// # Atomicity
     /// - All streams are processed in order. Any panic (stream not found, wrong recipient,
-    ///   completed, paused) reverts the whole transaction.
+    ///   paused) reverts the whole transaction.
+    /// - Completed streams are not an error: they produce amount `0` and no events.
     pub fn batch_withdraw(
         env: Env,
         recipient: Address,
@@ -1172,7 +1177,8 @@ impl FluxoraStream {
 
             if withdrawable > 0 {
                 stream.withdrawn_amount += withdrawable;
-                let completed_now = stream.withdrawn_amount == stream.deposit_amount;
+                let completed_now = stream.status == StreamStatus::Active
+                    && stream.withdrawn_amount == stream.deposit_amount;
                 if completed_now {
                     stream.status = StreamStatus::Completed;
                 }

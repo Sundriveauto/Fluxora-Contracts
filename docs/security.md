@@ -12,6 +12,7 @@ State updates are performed **before** any external token transfers in all funct
 
 - **`withdraw`**  
   After all checks (auth, status, withdrawable amount), the contract updates `withdrawn_amount` and, when applicable, sets status to `Completed`, then persists the stream with `save_stream`. Only after that does it call the token contract to transfer tokens to the recipient.
+  Completion is only allowed from `Active` status; cancelled streams remain `Cancelled` even when their accrued portion is fully withdrawn.
 
 After all checks (auth, status, withdrawable amount), the contract:
 1. Updates `withdrawn_amount` in the stream struct.

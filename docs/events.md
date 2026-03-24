@@ -16,7 +16,7 @@ Notes:
 | Event name | Topic(s) | Data (shape & types) | When emitted |
 |---|---:|---|---|
 | StreamCreated | ["created", stream_id] | StreamCreated { stream_id: u64, sender: Address, recipient: Address, deposit_amount: i128, rate_per_second: i128, start_time: u64, cliff_time: u64, end_time: u64 } | When a stream is successfully created (after tokens transferred). The `stream_id` is the newly assigned stream id (u64). The event is published in `persist_new_stream`. Not emitted on failed creation (e.g., `StartTimeInPast`).
-| Withdrawal | ["withdrew", stream_id] | withdraw_amount: i128 | When a recipient successfully withdraws accrued tokens. Only emitted when amount > 0.
+| Withdrawal | ["withdrew", stream_id] | Withdrawal { stream_id: u64, recipient: Address, amount: i128 } | When a recipient successfully withdraws accrued tokens. Only emitted when amount > 0.
 | StreamPaused | ["paused", stream_id] | StreamEvent::Paused(stream_id) — enum wrapper containing the u64 stream id | When a stream is paused by the sender or admin.
 | StreamResumed | ["resumed", stream_id] | StreamEvent::Resumed(stream_id) — enum wrapper containing the u64 stream id | When a paused stream is resumed by the sender or admin.
 | StreamCancelled | ["cancelled", stream_id] | StreamEvent::StreamCancelled(stream_id) — enum wrapper containing the u64 stream id | When a stream is cancelled by the sender or admin.
@@ -123,7 +123,7 @@ pub enum StreamEvent {
 | `pause_stream`, `pause_stream_as_admin`      | `"paused"`     | `StreamEvent::Paused(id)`      |
 | `resume_stream`, `resume_stream_as_admin`    | `"resumed"`    | `StreamEvent::Resumed(id)`     |
 | `cancel_stream`, `cancel_stream_as_admin`    | `"cancelled"`  | `StreamEvent::StreamCancelled(id)` |
-| `withdraw`, `batch_withdraw` (final drain)   | `"completed"`  | `StreamEvent::StreamCompleted(id)` |
+| `withdraw`, `batch_withdraw` (final drain on Active streams) | `"completed"`  | `StreamEvent::StreamCompleted(id)` |
 | `close_completed_stream`                     | `"closed"`     | `StreamEvent::StreamClosed(id)` |
 
 Example (cancelled):
@@ -220,8 +220,8 @@ Example:
   for all stream-level events.
 - For `Withdrawal` and `WithdrawalTo`, the `amount` field is `i128` — use a
   big-int library that supports 128-bit signed integers.
-- `StreamCompleted` is always emitted on the **same call** as the final
-  `Withdrawal` that drains the stream. Expect both events in the same transaction.
+- `StreamCompleted` is emitted on the **same call** as the final `Withdrawal` that drains
+  an `Active` stream. Cancelled streams do not transition to `Completed`.
 - `StreamClosed` signals that the stream's on-chain storage has been removed.
   After this event, `get_stream_state` returns `StreamNotFound` for that ID.
 - `AdminUpdated` has a single-element topic list (no stream_id).
@@ -233,7 +233,7 @@ Example:
 This file is derived from `contracts/stream/src/lib.rs` emit calls:
 
 - `persist_new_stream` publishes `(symbol_short!("created"), stream_id), StreamCreated { ... }`
-- `withdraw` publishes `(symbol_short!("withdrew"), stream_id), withdrawable`
+- `withdraw` publishes `(symbol_short!("withdrew"), stream_id), Withdrawal { stream_id, recipient, amount }`
 - `pause_stream` / `pause_stream_as_admin` publish `(symbol_short!("paused"), stream_id), StreamEvent::Paused(stream_id)`
 - `resume_stream` / `resume_stream_as_admin` publish `(symbol_short!("resumed"), stream_id), StreamEvent::Resumed(stream_id)`
 - `cancel_stream` / `cancel_stream_as_admin` publish `(symbol_short!("cancelled"), stream_id), StreamEvent::StreamCancelled(stream_id)`

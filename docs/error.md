@@ -16,13 +16,12 @@ This table lists all possible errors in the FluxoraStream contract, including bo
 | `stream must be active to pause`                | Cannot pause a stream unless it is active                                     | `pause_stream`, `pause_stream_as_admin` |
 | `stream is already paused`                      | Stream is already paused                                                     | `pause_stream` |
 | `stream is active, not paused`                 | Cannot resume a stream that is already active                                 | `resume_stream` |
-| `stream is completed`                           | Cannot resume or withdraw from a completed stream                             | `resume_stream`, `withdraw` |
+| `stream is completed`                           | Cannot resume a completed stream                                              | `resume_stream` |
 | `stream is cancelled`                           | Cannot resume a cancelled stream                                             | `resume_stream` |
 | `stream must be active or paused to cancel`    | Can only cancel active or paused streams                                     | `cancel_stream`, `cancel_stream_as_admin` |
 | `stream already completed`                      | Cannot withdraw from a completed stream                                      | `withdraw`, `withdraw_to` |
 | `cannot withdraw from paused stream`           | Cannot withdraw while stream is paused                                        | `withdraw`, `withdraw_to` |
 | `destination must not be the contract`        | Withdraw destination cannot be the contract address                           | `withdraw_to` |
-| `nothing to withdraw`                            | No withdrawable tokens available                                             | `withdraw` |
 | `stream must be active`                         | Admin cannot pause a stream that is not active                                 | `pause_stream_as_admin` |
 | `stream is not paused`                          | Admin cannot resume a stream that is not paused                                | `resume_stream_as_admin` |
 | `Unauthorized`                                  | Caller is not authorized to perform this operation                             | `init` (bootstrap admin auth), `set_admin`, `require_stream_sender` (internal checks) |

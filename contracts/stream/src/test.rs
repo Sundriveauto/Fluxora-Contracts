@@ -3175,6 +3175,84 @@ fn test_withdraw_not_recipient_unauthorized() {
     ctx.client().withdraw(&stream_id);
 }
 
+#[test]
+fn test_withdraw_not_recipient_unauthorized_has_no_side_effects() {
+    let ctx = TestContext::setup_strict();
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                1000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 1000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.env.ledger().set_timestamp(700);
+    let state_before = ctx.client().get_stream_state(&stream_id);
+    let sender_balance_before = ctx.token().balance(&ctx.sender);
+    let recipient_balance_before = ctx.token().balance(&ctx.recipient);
+    let contract_balance_before = ctx.token().balance(&ctx.contract_id);
+    let events_before = ctx.env.events().all().len();
+
+    // Wrong signer (sender instead of recipient) for withdraw.
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "withdraw",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().withdraw(&stream_id);
+    }));
+    assert!(result.is_err(), "non-recipient signer must be rejected");
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.withdrawn_amount, state_before.withdrawn_amount);
+    assert_eq!(state_after.status, state_before.status);
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_balance_before);
+    assert_eq!(
+        ctx.token().balance(&ctx.recipient),
+        recipient_balance_before
+    );
+    assert_eq!(
+        ctx.token().balance(&ctx.contract_id),
+        contract_balance_before
+    );
+    assert_eq!(ctx.env.events().all().len(), events_before);
+}
+
 // ---------------------------------------------------------------------------
 // Tests — close_completed_stream (#217)
 // ---------------------------------------------------------------------------
@@ -5728,6 +5806,59 @@ fn test_withdraw_status_transition_to_completed() {
     assert_eq!(state.status, StreamStatus::Completed);
 }
 
+#[test]
+fn test_withdraw_active_final_drain_emits_withdrew_then_completed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Do a partial withdrawal first, then final-drain withdrawal.
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().withdraw(&stream_id);
+
+    ctx.env.ledger().set_timestamp(1000);
+    let events_before = ctx.env.events().all().len();
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 600);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 1000);
+
+    let events = ctx.env.events().all();
+    let mut withdraw_idx: Option<u32> = None;
+    let mut completed_idx: Option<u32> = None;
+
+    for i in events_before..events.len() {
+        let event = events.get(i).unwrap();
+        if event.0 != ctx.contract_id {
+            continue;
+        }
+        let topic0 = Symbol::from_val(&ctx.env, &event.1.get(0).unwrap());
+        if topic0 == Symbol::new(&ctx.env, "withdrew") {
+            withdraw_idx = Some(i);
+            let payload = crate::Withdrawal::try_from_val(&ctx.env, &event.2).unwrap();
+            assert_eq!(payload.stream_id, stream_id);
+            assert_eq!(payload.recipient, ctx.recipient);
+            assert_eq!(payload.amount, 600);
+        }
+        if topic0 == Symbol::new(&ctx.env, "completed") {
+            completed_idx = Some(i);
+            let payload = StreamEvent::from_val(&ctx.env, &event.2);
+            assert_eq!(payload, StreamEvent::StreamCompleted(stream_id));
+        }
+    }
+
+    assert!(withdraw_idx.is_some(), "final withdraw must emit withdrew");
+    assert!(
+        completed_idx.is_some(),
+        "final withdraw on active stream must emit completed"
+    );
+    assert!(
+        withdraw_idx.unwrap() < completed_idx.unwrap(),
+        "withdrew event must be emitted before completed"
+    );
+}
+
 /// Test withdraw after cancel and then try to withdraw again
 /// Test withdraw after cancel then all accrued withdrawn.
 /// Should return 0 without transfer or state change (idempotent).
@@ -7081,6 +7212,50 @@ fn test_withdraw_after_cancel_status_stays_cancelled() {
         state_after_withdraw.status,
         StreamStatus::Cancelled,
         "status should STAY Cancelled (not become Completed)"
+    );
+}
+
+#[test]
+fn test_withdraw_after_cancel_at_full_accrual_stays_cancelled_no_completed_event() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    // Cancel at end-time where accrued == deposit and refund == 0.
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().cancel_stream(&stream_id);
+    let events_before = ctx.env.events().all().len();
+
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 1000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.withdrawn_amount, 1000);
+
+    let events = ctx.env.events().all();
+    let mut saw_completed = false;
+    let mut saw_withdrew = false;
+    for i in events_before..events.len() {
+        let event = events.get(i).unwrap();
+        if event.0 != ctx.contract_id {
+            continue;
+        }
+        let topic0 = Symbol::from_val(&ctx.env, &event.1.get(0).unwrap());
+        if topic0 == Symbol::new(&ctx.env, "withdrew") {
+            saw_withdrew = true;
+        }
+        if topic0 == Symbol::new(&ctx.env, "completed") {
+            saw_completed = true;
+        }
+    }
+
+    assert!(
+        saw_withdrew,
+        "recipient withdrawal after cancellation still emits withdrew"
+    );
+    assert!(
+        !saw_completed,
+        "cancelled stream must not emit completed on withdraw"
     );
 }
 

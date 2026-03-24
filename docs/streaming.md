@@ -78,7 +78,8 @@ sequenceDiagram
     Note over Sender, Recipient: 2. Cliff Period (no withdrawals)
 
     Recipient ->> Contract: withdraw(stream_id)
-    Contract --x Recipient: panic: "nothing to withdraw"
+    Contract -->> Recipient: 0
+    Note right of Contract: No state change, no transfer, no withdraw/completed events
 
     Note over Sender, Recipient: 3. After Cliff — Partial Withdrawal
 
@@ -87,7 +88,7 @@ sequenceDiagram
     Contract ->> Token: transfer(contract → recipient, withdrawable)
     Token -->> Contract: OK
     Contract -->> Recipient: withdrawable
-    Note right of Contract: Event: ("withdrew", stream_id) → withdrawable
+    Note right of Contract: Event: ("withdrew", stream_id) → Withdrawal { stream_id, recipient, amount }
 
     Note over Sender, Recipient: 4. Optional — Pause / Resume
 
@@ -112,7 +113,7 @@ sequenceDiagram
     Token -->> Contract: OK
     Contract ->> Contract: status = Completed
     Contract -->> Recipient: withdrawable
-    Note right of Contract: Event: ("withdrew", stream_id) → withdrawable
+    Note right of Contract: Event: ("withdrew", stream_id) → Withdrawal { stream_id, recipient, amount }
     Note right of Contract: Event: ("completed", stream_id)
 
     Note over Sender, Recipient: 5b. Alternative — Cancellation
@@ -261,6 +262,17 @@ Residual assumption: deployment flow must ensure the intended bootstrap admin si
 
 Scope note: these guarantees are limited to `create_streams` creation semantics. They do not change withdrawal, pause/resume, cancellation, or cleanup rules.
 
+### withdraw: Recipient-Only Auth and Completion Transition
+
+`withdraw(stream_id)` enforces recipient-only authorization and deterministic completion semantics:
+
+- Auth boundary: only the stream `recipient` can authorize `withdraw`.
+- Non-recipient calls fail before transfer/state/event side effects.
+- Zero-withdrawable path returns `0` and emits no withdraw/completed events.
+- Completion transition: only an `Active` stream can transition to `Completed` on final drain.
+- Cancelled streams may still be withdrawn (accrued portion), but status remains `Cancelled`.
+- Event ordering on active final drain: `withdrew` is emitted before `completed`.
+
 ---
 
 ## 5. Events
@@ -304,7 +316,8 @@ Emitted when a recipient successfully withdraws tokens via `withdraw`.
 | `("paused", stream_id)`    | `StreamEvent::Paused(stream_id)`         | `pause_stream` / `pause_stream_as_admin`   |
 | `("resumed", stream_id)`   | `StreamEvent::Resumed(stream_id)`        | `resume_stream` / `resume_stream_as_admin` |
 | `("cancelled", stream_id)` | `StreamEvent::StreamCancelled(stream_id)`| `cancel_stream` / `cancel_stream_as_admin` |
-| `("withdrew", stream_id)`  | `withdrawable` (i128)                    | `withdraw`                                 |
+| `("withdrew", stream_id)`  | `Withdrawal { stream_id, recipient, amount }` | `withdraw`                           |
+| `("completed", stream_id)` | `StreamEvent::StreamCompleted(stream_id)`| `withdraw` / `batch_withdraw` (active final drain) |
 | `("closed", stream_id)`    | `StreamEvent::StreamClosed(stream_id)`   | `close_completed_stream`                   |
 | `("top_up", stream_id)`    | `StreamToppedUp` (struct payload)        | `top_up_stream`                            |
 
@@ -339,7 +352,6 @@ errors relevant to stream creation and timing.
 | `"stream must be active or paused to cancel"`                           | `cancel_stream` / `cancel_stream_as_admin` | Cancel completed/cancelled   |
 | `"stream already completed"`                                            | `withdraw`                                 | Withdraw from completed      |
 | `"cannot withdraw from paused stream"`                                  | `withdraw`                                 | Withdraw while paused        |
-| `"nothing to withdraw"`                                                 | `withdraw`                                 | accrued == withdrawn_amount  |
 | `"stream is not active"`                                                | `pause_stream_as_admin`                    | Admin pause non-active       |
 | `"stream is not paused"`                                                | `resume_stream_as_admin`                   | Admin resume non-paused      |
 | `"can only close completed streams"`                                    | `close_completed_stream`                   | Close non-Completed stream   |
