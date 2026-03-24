@@ -22,6 +22,16 @@ After checks and computing the refund amount, the contract:
 2. Calls `save_stream` to persist the updated state.
 3. **Only then** transfers the unstreamed refund to the sender.
 
+Both sender/admin cancellation entrypoints route through the same internal logic.
+This guarantees identical externally visible semantics (state fields, refund math,
+and emitted event shape) regardless of which authorized role executed the cancel.
+
+Refund invariant for reviewers:
+
+`refund_amount = deposit_amount - accrued_at(cancelled_at)`
+
+where `accrued_at(cancelled_at)` is frozen for all future reads after cancellation.
+
 ### `top_up_stream`
 
 After authorization and amount validation, the contract:
@@ -82,6 +92,12 @@ reentrancy impact — state will already reflect the current operation when the 
 | `close_completed_stream`| Permissionless (any caller)               |
 | `set_admin`            | Current contract admin                      |
 | `set_contract_paused`  | Contract admin                              |
+
+Cancellation-specific boundary checks:
+
+1. Sender path (`cancel_stream`) cannot be executed by recipient or third party.
+2. Admin path (`cancel_stream_as_admin`) cannot be executed by non-admin callers.
+3. Streams in terminal states (`Completed`, `Cancelled`) are rejected with `InvalidState`.
 
 ---
 

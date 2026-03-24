@@ -42,6 +42,46 @@ When changing the contract:
 
 Terminal states: `Completed`, `Cancelled`. They cannot transition to any other state.
 
+### Cancellation Semantics (Issue Scope)
+
+This section is the protocol-level contract for `cancel_stream` and `cancel_stream_as_admin`.
+
+Success semantics (observable):
+
+1. Preconditions: stream status is `Active` or `Paused`.
+2. `cancelled_at` is set to current ledger timestamp.
+3. Accrued amount is frozen at `cancelled_at` (no post-cancel time growth).
+4. Refund is `deposit_amount - accrued_at_cancelled_at`.
+5. Stream transitions to terminal `Cancelled` state.
+6. `StreamCancelled` event is emitted with topic `("cancelled", stream_id)`.
+
+Failure semantics (observable):
+
+1. Missing stream: `ContractError::StreamNotFound`.
+2. Non-cancellable status (`Completed` or already `Cancelled`): `ContractError::InvalidState`.
+3. Unauthorized caller on sender path: authorization failure from `sender.require_auth()`.
+4. Unauthorized caller on admin path: authorization failure from `admin.require_auth()`.
+5. Any failure is atomic: no refund transfer, no state mutation, no cancel event.
+
+Role boundaries:
+
+1. `cancel_stream`: only the stream `sender` can authorize.
+2. `cancel_stream_as_admin`: only contract `admin` can authorize.
+3. Recipient and third parties cannot cancel through either path unless they hold required credentials.
+
+Invariants after successful cancellation:
+
+1. `status == Cancelled` and `cancelled_at.is_some()`.
+2. `calculate_accrued(stream_id)` always returns accrued at `cancelled_at`.
+3. `refund + frozen_accrued == deposit_amount`.
+4. Recipient may withdraw only frozen accrued remainder (`frozen_accrued - withdrawn_amount`).
+
+Scope boundary and exclusions:
+
+1. In scope: refund math, `cancelled_at` persistence/freeze semantics, cancel auth paths, cancel event consistency.
+2. Out of scope: token-level trust assumptions beyond documented model, off-chain indexer liveness, and economic policy choices (for example who should bear operational costs).
+3. Residual risk: if a non-standard token violates SEP-41 expectations, transfer behavior may diverge; CEI ordering reduces but cannot fully eliminate external token risk.
+
 ```mermaid
 stateDiagram-v2
     direction LR

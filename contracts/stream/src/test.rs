@@ -2404,6 +2404,7 @@ fn test_cancel_stream_full_refund() {
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.cancelled_at, Some(0));
 
     let sender_balance_after = ctx.token().balance(&ctx.sender);
     assert_eq!(sender_balance_after - sender_balance_before, 1000);
@@ -2419,6 +2420,10 @@ fn test_cancel_stream_partial_refund() {
 
     ctx.client().cancel_stream(&stream_id);
 
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.cancelled_at, Some(300));
+
     let sender_balance_after = ctx.token().balance(&ctx.sender);
     assert_eq!(sender_balance_after - sender_balance_before, 700);
 }
@@ -2433,6 +2438,31 @@ fn test_cancel_stream_as_admin() {
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.cancelled_at, Some(0));
+}
+
+#[test]
+fn test_cancel_refund_plus_frozen_accrued_equals_deposit() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream(); // deposit=1000, rate=1/s
+
+    ctx.env.ledger().set_timestamp(420);
+    let sender_before = ctx.token().balance(&ctx.sender);
+    ctx.client().cancel_stream(&stream_id);
+    let sender_after = ctx.token().balance(&ctx.sender);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.cancelled_at, Some(420));
+
+    // Advance time to prove accrual is frozen at cancelled_at.
+    ctx.env.ledger().set_timestamp(9_999);
+    let frozen_accrued = ctx.client().calculate_accrued(&stream_id);
+    let refund = sender_after - sender_before;
+
+    assert_eq!(refund, 580);
+    assert_eq!(frozen_accrued, 420);
+    assert_eq!(refund + frozen_accrued, state.deposit_amount);
 }
 
 #[test]
@@ -3395,8 +3425,13 @@ fn test_pause_resume_events() {
 fn test_cancel_event() {
     let ctx = TestContext::setup();
     let stream_id = ctx.create_default_stream();
+    ctx.env.ledger().set_timestamp(77);
 
     ctx.client().cancel_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.cancelled_at, Some(77));
 
     let events = ctx.env.events().all();
     let last_event = events.last().unwrap();

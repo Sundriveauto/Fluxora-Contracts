@@ -840,17 +840,20 @@ impl FluxoraStream {
     ///
     /// # Behavior
     /// 1. Validates stream is in `Active` or `Paused` state
-    /// 2. Calculates accrued amount: `min((now - start_time) × rate, deposit_amount)`
-    /// 3. Calculates refund: `deposit_amount - accrued`
-    /// 4. Transfers refund to sender (if > 0)
-    /// 5. Sets stream status to `Cancelled`
-    /// 6. Accrued but not withdrawn amount remains for recipient
+    /// 2. Captures cancellation timestamp: `now = ledger.timestamp()`
+    /// 3. Calculates accrued amount at `now`: `min((now - start_time) × rate, deposit_amount)`
+    /// 4. Calculates refund: `deposit_amount - accrued_at_now`
+    /// 5. Persists terminal state before transfer:
+    ///    - `status = Cancelled`
+    ///    - `cancelled_at = Some(now)`
+    /// 6. Transfers refund to sender (if > 0)
+    /// 7. Emits `StreamCancelled(stream_id)` event
     ///
     /// # Returns
     /// - Implicitly returns via state change and token transfer
     ///
     /// # Panics
-    /// - If stream is not `Active` or `Paused` (already completed or cancelled)
+    /// - Returns `ContractError::InvalidState` if stream is not `Active` or `Paused`
     /// - If the stream does not exist (`stream_id` is invalid)
     /// - If caller is not authorized (not the sender)
     /// - If token transfer fails (should not happen with valid contract state)
@@ -880,26 +883,7 @@ impl FluxoraStream {
     pub fn cancel_stream(env: Env, stream_id: u64) -> Result<(), ContractError> {
         let mut stream = load_stream(&env, stream_id)?;
         Self::require_stream_sender(&stream.sender);
-        Self::require_cancellable_status(&env, stream.status);
-
-        let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
-        let unstreamed = stream.deposit_amount - accrued;
-
-        // CEI: update state before external token transfer to reduce reentrancy risk.
-        // Assumption: the token contract does not reenter this contract.
-        stream.status = StreamStatus::Cancelled;
-        stream.cancelled_at = Some(env.ledger().timestamp());
-        save_stream(&env, &stream);
-
-        if unstreamed > 0 {
-            push_token(&env, &stream.sender, unstreamed);
-        }
-
-        env.events().publish(
-            (symbol_short!("cancelled"), stream_id),
-            StreamEvent::StreamCancelled(stream_id),
-        );
-        Ok(())
+        Self::cancel_stream_internal(&env, &mut stream)
     }
 
     /// Withdraw accrued tokens from a payment stream to the recipient.
@@ -1966,6 +1950,47 @@ impl FluxoraStream {
             panic_with_error!(env, ContractError::InvalidState);
         }
     }
+
+    /// Shared cancellation implementation for sender/admin entrypoints.
+    ///
+    /// Guarantees identical externally visible behavior across both auth paths:
+    /// - same state transition (`status = Cancelled`, `cancelled_at = now`)
+    /// - same refund rule (`refund = deposit_amount - accrued_at_now`)
+    /// - same event shape (`StreamCancelled(stream_id)`)
+    fn cancel_stream_internal(env: &Env, stream: &mut Stream) -> Result<(), ContractError> {
+        Self::require_cancellable_status(env, stream.status);
+
+        let now = env.ledger().timestamp();
+        let accrued_at_cancel = accrual::calculate_accrued_amount(
+            stream.start_time,
+            stream.cliff_time,
+            stream.end_time,
+            stream.rate_per_second,
+            stream.deposit_amount,
+            now,
+        );
+
+        let refund_amount = stream
+            .deposit_amount
+            .checked_sub(accrued_at_cancel)
+            .ok_or(ContractError::InvalidState)?;
+
+        // CEI: persist terminal state before external token transfer.
+        stream.status = StreamStatus::Cancelled;
+        stream.cancelled_at = Some(now);
+        save_stream(env, stream);
+
+        if refund_amount > 0 {
+            push_token(env, &stream.sender, refund_amount);
+        }
+
+        env.events().publish(
+            (symbol_short!("cancelled"), stream.stream_id),
+            StreamEvent::StreamCancelled(stream.stream_id),
+        );
+
+        Ok(())
+    }
 }
 
 #[contractimpl]
@@ -1985,13 +2010,13 @@ impl FluxoraStream {
     /// # Behavior
     /// Same as `cancel_stream`:
     /// 1. Validates stream is in `Active` or `Paused` state
-    /// 2. Calculates accrued amount based on time elapsed
-    /// 3. Refunds unstreamed tokens to sender
-    /// 4. Sets stream status to `Cancelled`
-    /// 5. Accrued amount remains for recipient to withdraw
+    /// 2. Captures `cancelled_at = ledger.timestamp()`
+    /// 3. Refunds `deposit_amount - accrued_at_cancelled_at` to sender
+    /// 4. Persists `status = Cancelled` and `cancelled_at`
+    /// 5. Emits `StreamCancelled(stream_id)`
     ///
     /// # Panics
-    /// - If stream is not `Active` or `Paused`
+    /// - Returns `ContractError::InvalidState` if stream is not `Active` or `Paused`
     /// - If the stream does not exist
     /// - If caller is not the admin
     /// - If token transfer fails
@@ -2015,29 +2040,7 @@ impl FluxoraStream {
 
         let mut stream = load_stream(&env, stream_id)?;
 
-        assert!(
-            stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused,
-            "stream must be active or paused to cancel"
-        );
-
-        let accrued = Self::calculate_accrued(env.clone(), stream_id)?;
-        let unstreamed = stream.deposit_amount - accrued;
-
-        // CEI: update state before external token transfer to reduce reentrancy risk.
-        // Assumption: the token contract does not reenter this contract.
-        stream.status = StreamStatus::Cancelled;
-        stream.cancelled_at = Some(env.ledger().timestamp());
-        save_stream(&env, &stream);
-
-        if unstreamed > 0 {
-            push_token(&env, &stream.sender, unstreamed);
-        }
-
-        env.events().publish(
-            (symbol_short!("cancelled"), stream_id),
-            StreamEvent::StreamCancelled(stream_id),
-        );
-        Ok(())
+        Self::cancel_stream_internal(&env, &mut stream)
     }
 
     /// Pause a payment stream as the contract admin.

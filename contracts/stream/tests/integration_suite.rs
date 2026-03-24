@@ -402,6 +402,7 @@ fn cancel_stream_updates_state_before_transfer() {
     // State must be Cancelled
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.cancelled_at, Some(500));
 
     // Sender gets back unstreamed 500
     assert_eq!(ctx.token.balance(&ctx.sender), 9_500);
@@ -419,6 +420,7 @@ fn cancel_stream_as_admin_updates_state_before_transfer() {
 
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.cancelled_at, Some(300));
 
     // Sender gets back 700 unstreamed
     assert_eq!(ctx.token.balance(&ctx.sender), 9_700);
@@ -735,6 +737,7 @@ fn integration_cancel_partial_accrual_partial_refund() {
     // Verify stream status is Cancelled
     let state = ctx.client().get_stream_state(&stream_id);
     assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.cancelled_at, Some(1500));
 
     // Verify sender received refund of unstreamed amount (3500 tokens)
     let sender_after_cancel = ctx.token.balance(&ctx.sender);
@@ -751,6 +754,42 @@ fn integration_cancel_partial_accrual_partial_refund() {
     assert_eq!(withdrawn, 1500);
     assert_eq!(ctx.token.balance(&ctx.recipient), 1_500);
     assert_eq!(ctx.token.balance(&ctx.contract_id), 0);
+}
+
+#[test]
+fn integration_cancel_refund_plus_frozen_accrued_equals_deposit() {
+    let ctx = TestContext::setup();
+
+    // 3000 tokens over 3000s at 1 token/s
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &3000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &3000u64,
+    );
+
+    // Cancel at t=1200
+    ctx.env.ledger().set_timestamp(1200);
+    let sender_before_cancel = ctx.token.balance(&ctx.sender);
+    ctx.client().cancel_stream(&stream_id);
+    let sender_after_cancel = ctx.token.balance(&ctx.sender);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.cancelled_at, Some(1200));
+
+    // Move far forward; accrued must remain frozen at cancelled_at.
+    ctx.env.ledger().set_timestamp(9_000);
+    let frozen_accrued = ctx.client().calculate_accrued(&stream_id);
+    let refund = sender_after_cancel - sender_before_cancel;
+
+    assert_eq!(frozen_accrued, 1200);
+    assert_eq!(refund, 1800);
+    assert_eq!(refund + frozen_accrued, state.deposit_amount);
 }
 
 /// Integration test: create stream → advance to 100% → cancel → no refund.
