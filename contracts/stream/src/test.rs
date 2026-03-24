@@ -8948,3 +8948,805 @@ fn test_top_up_stream_insufficient_balance_reverts_cleanly() {
         "deposit_amount must be unchanged after failed top_up"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tests — extend_stream_end_time: deposit sufficiency under longer duration
+// ---------------------------------------------------------------------------
+
+// --- Success paths ---
+
+/// Exact boundary: deposit == rate * new_duration must succeed.
+/// This is the tightest valid case; any less would be rejected.
+#[test]
+fn test_extend_end_time_deposit_exactly_covers_new_duration() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // deposit=2000, rate=1, start=0, end=1000 → deposit covers up to t=2000
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Extend to 2000: rate(1) * new_duration(2000) == deposit(2000) — exact boundary
+    ctx.client().extend_stream_end_time(&stream_id, &2000u64);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time, 2000);
+    assert_eq!(state.deposit_amount, 2000, "deposit must be unchanged");
+    assert_eq!(state.rate_per_second, 1, "rate must be unchanged");
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+/// Deposit exceeds new required amount — extension succeeds with surplus.
+#[test]
+fn test_extend_end_time_deposit_exceeds_new_duration_requirement() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // deposit=5000, rate=1, end=1000 → surplus of 4000 over minimum
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &5000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Extend to 3000: rate(1) * 3000 = 3000 < deposit(5000) — surplus remains
+    ctx.client().extend_stream_end_time(&stream_id, &3000u64);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time, 3000);
+    assert_eq!(state.deposit_amount, 5000, "deposit must be unchanged");
+}
+
+/// Extension on a Paused stream must succeed (non-terminal state).
+#[test]
+fn test_extend_end_time_paused_stream_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.client().pause_stream(&stream_id);
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).status,
+        StreamStatus::Paused
+    );
+
+    ctx.client().extend_stream_end_time(&stream_id, &2000u64);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time, 2000);
+    assert_eq!(
+        state.status,
+        StreamStatus::Paused,
+        "status must stay Paused"
+    );
+}
+
+/// Accrual at the current ledger time must be unchanged after extension.
+#[test]
+fn test_extend_end_time_accrual_unchanged_at_extension_time() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &3000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.env.ledger().set_timestamp(600);
+    let accrued_before = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued_before, 600);
+
+    ctx.client().extend_stream_end_time(&stream_id, &3000u64);
+
+    // Same ledger timestamp — accrued must not change
+    let accrued_after = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued_after, accrued_before,
+        "accrual at extension time must be unchanged"
+    );
+}
+
+/// After extension, accrual continues linearly up to the new end_time.
+#[test]
+fn test_extend_end_time_accrual_continues_to_new_end() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &3000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.client().extend_stream_end_time(&stream_id, &3000u64);
+
+    // Past the old end_time (1000) but before new end_time (3000)
+    ctx.env.ledger().set_timestamp(2000);
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 2000, "accrual must continue past old end_time");
+
+    // At new end_time
+    ctx.env.ledger().set_timestamp(3000);
+    let accrued_at_new_end = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued_at_new_end, 3000, "accrual must reach new end_time");
+
+    // Past new end_time — capped at deposit
+    ctx.env.ledger().set_timestamp(9999);
+    let accrued_past = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued_past, 3000,
+        "accrual must cap at deposit after new end"
+    );
+}
+
+/// Recipient can withdraw tokens accrued in the extended window.
+#[test]
+fn test_extend_end_time_recipient_can_withdraw_extended_accrual() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Withdraw up to old end_time
+    ctx.env.ledger().set_timestamp(1000);
+    let w1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w1, 1000);
+
+    // Extend before stream completes (deposit still covers more)
+    ctx.client().extend_stream_end_time(&stream_id, &2000u64);
+
+    // Withdraw in the extended window
+    ctx.env.ledger().set_timestamp(1500);
+    let w2 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w2, 500, "should withdraw tokens accrued in extended window");
+
+    ctx.env.ledger().set_timestamp(2000);
+    let w3 = ctx.client().withdraw(&stream_id);
+    assert_eq!(w3, 500);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 2000);
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 0);
+}
+
+/// top_up then extend: after topping up, a previously-blocked extension succeeds.
+#[test]
+fn test_extend_end_time_after_top_up_succeeds() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // Tight deposit: exactly covers original duration
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Extension to 1500 would need 1500 tokens — currently blocked
+    let result = ctx
+        .client()
+        .try_extend_stream_end_time(&stream_id, &1500u64);
+    assert!(
+        result.is_err(),
+        "extension must fail before top-up when deposit is insufficient"
+    );
+
+    // Top up 500 tokens to cover the extended duration
+    ctx.client()
+        .top_up_stream(&stream_id, &ctx.sender, &500_i128);
+
+    // Now extension must succeed
+    ctx.client().extend_stream_end_time(&stream_id, &1500u64);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time, 1500);
+    assert_eq!(state.deposit_amount, 1500);
+}
+
+/// Extension emits StreamEndExtended event with correct old/new end_time.
+#[test]
+fn test_extend_end_time_emits_correct_event() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.client().extend_stream_end_time(&stream_id, &2000u64);
+
+    let events = ctx.env.events().all();
+    let last = events.last().expect("expected at least one event");
+
+    let payload = crate::StreamEndExtended::try_from_val(&ctx.env, &last.2)
+        .expect("event data must deserialise as StreamEndExtended");
+
+    assert_eq!(payload.stream_id, stream_id);
+    assert_eq!(payload.old_end_time, 1000);
+    assert_eq!(payload.new_end_time, 2000);
+}
+
+/// No token transfer occurs on extension (deposit stays in contract).
+#[test]
+fn test_extend_end_time_no_token_transfer() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let sender_before = ctx.token().balance(&ctx.sender);
+    let contract_before = ctx.token().balance(&ctx.contract_id);
+    let recipient_before = ctx.token().balance(&ctx.recipient);
+
+    ctx.client().extend_stream_end_time(&stream_id, &2000u64);
+
+    assert_eq!(ctx.token().balance(&ctx.sender), sender_before);
+    assert_eq!(ctx.token().balance(&ctx.contract_id), contract_before);
+    assert_eq!(ctx.token().balance(&ctx.recipient), recipient_before);
+}
+
+// --- Failure paths ---
+
+/// Deposit one token short of covering new duration must be rejected.
+#[test]
+#[should_panic(
+    expected = "deposit_amount must cover total streamable amount for extended schedule"
+)]
+fn test_extend_end_time_deposit_one_short_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // deposit=1000, rate=1, end=1000 → deposit covers exactly 1000s
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Extending to 1001 requires 1001 tokens; deposit is only 1000
+    ctx.client().extend_stream_end_time(&stream_id, &1001u64);
+}
+
+/// Deposit far below new duration requirement must be rejected.
+#[test]
+#[should_panic(
+    expected = "deposit_amount must cover total streamable amount for extended schedule"
+)]
+fn test_extend_end_time_deposit_far_below_new_requirement_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Extending to 10000 requires 10000 tokens; deposit is only 1000
+    ctx.client().extend_stream_end_time(&stream_id, &10000u64);
+}
+
+/// Extending a Completed stream must be rejected.
+#[test]
+#[should_panic(expected = "can only extend active or paused streams")]
+fn test_extend_end_time_completed_stream_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // deposit == rate * duration so the stream completes on full withdrawal
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+
+    // Any extension on a Completed stream must panic
+    ctx.client().extend_stream_end_time(&stream_id, &2000u64);
+}
+
+/// Extending a Cancelled stream must be rejected.
+#[test]
+#[should_panic(expected = "can only extend active or paused streams")]
+fn test_extend_end_time_cancelled_stream_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.client().cancel_stream(&stream_id);
+
+    ctx.client().extend_stream_end_time(&stream_id, &2000u64);
+}
+
+/// new_end_time <= current end_time must be rejected.
+#[test]
+#[should_panic(expected = "new end_time must be after existing end_time")]
+fn test_extend_end_time_same_end_time_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Same end_time — not an extension
+    ctx.client().extend_stream_end_time(&stream_id, &1000u64);
+}
+
+/// new_end_time before current end_time must be rejected (use shorten instead).
+#[test]
+#[should_panic(expected = "new end_time must be after existing end_time")]
+fn test_extend_end_time_shorter_end_time_rejected() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.client().extend_stream_end_time(&stream_id, &500u64);
+}
+
+/// Non-sender (recipient) cannot extend the stream.
+#[test]
+#[should_panic]
+fn test_extend_end_time_recipient_unauthorized() {
+    let ctx = TestContext::setup_strict();
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                2000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 2000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    // Recipient attempts to extend — must fail
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "extend_stream_end_time",
+            args: (stream_id, 2000u64).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().extend_stream_end_time(&stream_id, &2000u64);
+}
+
+/// Third-party address cannot extend the stream.
+#[test]
+#[should_panic]
+fn test_extend_end_time_third_party_unauthorized() {
+    let ctx = TestContext::setup_strict();
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                2000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 2000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let other = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &other,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "extend_stream_end_time",
+            args: (stream_id, 2000u64).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().extend_stream_end_time(&stream_id, &2000u64);
+}
+
+/// Sender authorization succeeds (positive auth test).
+#[test]
+fn test_extend_end_time_sender_authorized() {
+    let ctx = TestContext::setup_strict();
+
+    use soroban_sdk::{testutils::MockAuth, testutils::MockAuthInvoke, IntoVal};
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "create_stream",
+            args: (
+                &ctx.sender,
+                &ctx.recipient,
+                2000_i128,
+                1_i128,
+                0u64,
+                0u64,
+                1000u64,
+            )
+                .into_val(&ctx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &ctx.token_id,
+                fn_name: "transfer",
+                args: (&ctx.sender, &ctx.contract_id, 2000_i128).into_val(&ctx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "extend_stream_end_time",
+            args: (stream_id, 2000u64).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    ctx.client().extend_stream_end_time(&stream_id, &2000u64);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time, 2000);
+}
+
+// --- Overflow / numeric edge cases ---
+
+/// Extension that would cause rate * new_duration to overflow i128 must panic
+/// before any state change.
+///
+/// Strategy: create a stream with rate=1000, duration=1 (deposit=1000 covers it).
+/// Extending to u64::MAX seconds: 1000 * u64::MAX overflows i128.
+#[test]
+fn test_extend_end_time_overflow_panics_no_state_change() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    // rate=1000, duration=1 → deposit=1000 exactly covers it (within setup mint of 10_000)
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1000_i128,
+        &0u64,
+        &0u64,
+        &1u64,
+    );
+
+    let end_before = ctx.client().get_stream_state(&stream_id).end_time;
+
+    // Extending to u64::MAX: 1000 * u64::MAX >> i128::MAX → overflow
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.client().extend_stream_end_time(&stream_id, &u64::MAX);
+    }));
+
+    assert!(
+        result.is_err(),
+        "overflow in rate * new_duration must panic"
+    );
+
+    // end_time must be unchanged
+    assert_eq!(
+        ctx.client().get_stream_state(&stream_id).end_time,
+        end_before,
+        "end_time must not change after overflow panic"
+    );
+}
+
+/// High-rate stream: extension to exact deposit boundary succeeds without overflow.
+#[test]
+fn test_extend_end_time_high_rate_exact_boundary() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let rate: i128 = 1_000_000_i128;
+    let deposit: i128 = 2_000_000_i128; // covers 2 seconds at this rate
+    ctx.sac.mint(&ctx.sender, &deposit);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &deposit,
+        &rate,
+        &0u64,
+        &0u64,
+        &1u64, // 1 second initially
+    );
+
+    // Extend to 2 seconds: rate(1_000_000) * 2 = 2_000_000 == deposit — exact boundary
+    ctx.client().extend_stream_end_time(&stream_id, &2u64);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.end_time, 2);
+    assert_eq!(state.deposit_amount, deposit);
+}
+
+// --- State consistency after failed extension ---
+
+/// A failed extension (insufficient deposit) must leave all stream fields unchanged.
+#[test]
+fn test_extend_end_time_failed_leaves_state_unchanged() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let state_before = ctx.client().get_stream_state(&stream_id);
+
+    let result = ctx
+        .client()
+        .try_extend_stream_end_time(&stream_id, &5000u64);
+    assert!(result.is_err(), "extension must fail");
+
+    let state_after = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state_after.end_time, state_before.end_time);
+    assert_eq!(state_after.deposit_amount, state_before.deposit_amount);
+    assert_eq!(state_after.rate_per_second, state_before.rate_per_second);
+    assert_eq!(state_after.status, state_before.status);
+    assert_eq!(state_after.withdrawn_amount, state_before.withdrawn_amount);
+}
+
+/// A failed extension must not emit any events.
+#[test]
+fn test_extend_end_time_failed_emits_no_event() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    let events_before = ctx.env.events().all().len();
+
+    let _ = ctx
+        .client()
+        .try_extend_stream_end_time(&stream_id, &5000u64);
+
+    assert_eq!(
+        ctx.env.events().all().len(),
+        events_before,
+        "no event must be emitted on failed extension"
+    );
+}
+
+// --- Cliff interaction ---
+
+/// Extension must preserve cliff_time; new_end_time >= cliff_time is already
+/// guaranteed because new_end_time > old_end_time >= cliff_time.
+#[test]
+fn test_extend_end_time_cliff_preserved() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &3000_i128,
+        &1_i128,
+        &0u64,
+        &500u64, // cliff at 500
+        &1000u64,
+    );
+
+    ctx.client().extend_stream_end_time(&stream_id, &3000u64);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.cliff_time, 500, "cliff_time must be unchanged");
+    assert_eq!(state.end_time, 3000);
+
+    // Accrual before cliff must still be zero
+    ctx.env.ledger().set_timestamp(300);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 0);
+
+    // Accrual after cliff must work correctly
+    ctx.env.ledger().set_timestamp(800);
+    assert_eq!(ctx.client().calculate_accrued(&stream_id), 800);
+}
+
+// --- Integration: extend then withdraw full extended amount ---
+
+/// Full integration: create → extend → withdraw entire extended deposit.
+#[test]
+fn test_extend_end_time_integration_full_withdrawal() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &2000_i128,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1000u64,
+    );
+
+    ctx.client().extend_stream_end_time(&stream_id, &2000u64);
+
+    ctx.env.ledger().set_timestamp(2000);
+    let withdrawn = ctx.client().withdraw(&stream_id);
+    assert_eq!(withdrawn, 2000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+    assert_eq!(state.withdrawn_amount, 2000);
+    assert_eq!(ctx.token().balance(&ctx.contract_id), 0);
+    assert_eq!(ctx.token().balance(&ctx.recipient), 2000);
+}

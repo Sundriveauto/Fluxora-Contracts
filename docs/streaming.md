@@ -194,6 +194,14 @@ At creation:
 deposit_amount >= rate_per_second * (end_time - start_time)
 ```
 
+The same sufficiency check is enforced when extending a stream's `end_time`:
+
+```text
+deposit_amount >= rate_per_second * (new_end_time - start_time)
+```
+
+If the existing deposit does not cover the extended duration, `extend_stream_end_time` panics with `"deposit_amount must cover total streamable amount for extended schedule"` and no state changes occur. Use `top_up_stream` first to increase the deposit, then extend.
+
 ### Start Time Boundary (Creation)
 
 - `start_time` **must be >= current ledger timestamp** at creation time.
@@ -232,6 +240,9 @@ deposit_amount >= rate_per_second * (end_time - start_time)
 | `cancel_stream_as_admin` | Admin             | `admin.require_auth()`     |
 | `close_completed_stream` | Anyone            | None (permissionless cleanup) |
 | `top_up_stream`          | Funder address    | `funder.require_auth()`    |
+| `update_rate_per_second` | Sender            | `sender.require_auth()`    |
+| `shorten_stream_end_time`| Sender            | `sender.require_auth()`    |
+| `extend_stream_end_time` | Sender            | `sender.require_auth()`    |
 
 **Note:** Sender-managed functions (`pause_stream`, `resume_stream`, `cancel_stream`) require sender auth. Admin uses separate `_as_admin` entry points.
 

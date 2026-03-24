@@ -20,6 +20,13 @@ This document lists all public entrypoints and core invariants of the Fluxora st
 | `cancel_stream_as_admin` | `env: Env`, `stream_id: u64` | — | Admin only | Same behaviour as cancel_stream; admin auth instead of sender. |
 | `pause_stream_as_admin` | `env: Env`, `stream_id: u64` | — | Admin only | Same behaviour as pause_stream; admin auth. |
 | `resume_stream_as_admin` | `env: Env`, `stream_id: u64` | — | Admin only | Same behaviour as resume_stream; admin auth. |
+| `update_rate_per_second` | `env: Env`, `stream_id: u64`, `new_rate_per_second: i128` | — | Sender | Increase rate (forward-only). Deposit must still cover `new_rate × duration`. Active or Paused only. |
+| `shorten_stream_end_time` | `env: Env`, `stream_id: u64`, `new_end_time: u64` | — | Sender | Reduce `end_time`; refund unstreamed tokens to sender. Active or Paused only. |
+| `extend_stream_end_time` | `env: Env`, `stream_id: u64`, `new_end_time: u64` | — | Sender | Increase `end_time`. Existing `deposit_amount` must cover `rate × new_duration`. No token transfer. Active or Paused only. |
+| `top_up_stream` | `env: Env`, `stream_id: u64`, `funder: Address`, `amount: i128` | — | Funder | Pull additional tokens into the stream deposit. Active or Paused only. |
+| `close_completed_stream` | `env: Env`, `stream_id: u64` | — | Anyone | Remove storage for a Completed stream. Permissionless cleanup. |
+| `set_admin` | `env: Env`, `new_admin: Address` | — | Admin | Rotate admin key. |
+| `version` | `env: Env` | `u32` | None (view) | Return compile-time contract version. |
 
 There is no `version` entrypoint in the contract.
 
@@ -54,6 +61,9 @@ Auditors can use these as a checklist; the implementation is intended to preserv
 
 6. **Deposit covers total streamable amount**  
    `deposit_amount >= rate_per_second × (end_time − start_time)` is enforced in `create_stream`.
+
+7. **Deposit sufficiency preserved on extension**  
+   `extend_stream_end_time` re-validates `deposit_amount >= rate_per_second × (new_end_time − start_time)` before updating `end_time`. If the check fails, the call panics and no state changes occur. No token transfer happens on extension — the deposit already held in the contract must cover the longer duration. Use `top_up_stream` first if the current deposit is insufficient.
 
 7. **Time bounds**  
    `start_time < end_time` and `cliff_time ∈ [start_time, end_time]` are enforced in `create_stream`.
