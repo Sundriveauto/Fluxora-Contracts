@@ -18,7 +18,7 @@ This table lists all possible errors in the FluxoraStream contract, including bo
 | `stream is active, not paused`                 | Cannot resume a stream that is already active                                 | `resume_stream` |
 | `stream is completed`                           | Cannot resume a completed stream                                              | `resume_stream` |
 | `stream is cancelled`                           | Cannot resume a cancelled stream                                             | `resume_stream` |
-| `stream must be active or paused to cancel`    | Can only cancel active or paused streams                                     | `cancel_stream`, `cancel_stream_as_admin` |
+| `InvalidState`                                  | Can only cancel streams in `Active` or `Paused` state                         | `cancel_stream`, `cancel_stream_as_admin` |
 | `stream already completed`                      | Cannot withdraw from a completed stream                                      | `withdraw`, `withdraw_to` |
 | `cannot withdraw from paused stream`           | Cannot withdraw while stream is paused                                        | `withdraw`, `withdraw_to` |
 | `destination must not be the contract`        | Withdraw destination cannot be the contract address                           | `withdraw_to` |
@@ -30,6 +30,6 @@ This table lists all possible errors in the FluxoraStream contract, including bo
 | `overflow calculating total batch deposit`     | Overflow occurred when summing deposits across batch entries                   | `create_streams` |
 | `can only close completed streams`             | Stream must be Completed to be closed                                           | `close_completed_stream` |
 | `contract not initialised: missing config`     | Contract storage not initialized before access                                  | `get_config`, `get_token`, `get_admin` |
-| `InvalidState`                                  | Operation attempted on a stream in an invalid state (Paused, Completed, Cancelled) | `pause_stream`, `resume_stream`, `cancel_stream`, `withdraw` |
+| `InvalidState`                                  | Operation attempted on a stream in an invalid state (for cancel: not Active/Paused) | `pause_stream`, `resume_stream`, `cancel_stream`, `cancel_stream_as_admin`, `withdraw` |
 | `InvalidParams`                                 | Function input parameters are invalid (generic catch-all for asserts)          | `create_stream` |
 | `ContractPaused` (error code 4)                 | Global pause active; creation blocked until admin calls `set_contract_paused(false)` | `create_stream`, `create_streams` |
