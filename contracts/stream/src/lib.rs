@@ -1035,27 +1035,59 @@ impl FluxoraStream {
 
     /// Withdraw accrued tokens from a payment stream to a specified destination address.
     ///
-    /// Same accounting as `withdraw`, but transfers tokens to `destination` instead of
-    /// the stream's recipient. Use for wallet migration or custody workflows. The caller
-    /// must still be the stream's recipient (recipient-authorized).
+    /// Same accounting as [`withdraw`], but transfers tokens to `destination` instead of
+    /// the stream's recipient. Use for wallet migration or custody workflows where the
+    /// recipient wants tokens delivered to a different address (e.g. a cold wallet or
+    /// a custody contract). The caller must still be the stream's recipient.
     ///
     /// # Parameters
     /// - `stream_id`: Unique identifier of the stream to withdraw from
-    /// - `destination`: Address to receive the withdrawn tokens (must not be the contract)
+    /// - `destination`: Address to receive the withdrawn tokens (must not be the contract itself)
     ///
     /// # Returns
-    /// - `i128`: The amount of tokens transferred to the destination (0 if nothing to withdraw)
+    /// - `i128`: The amount of tokens transferred to `destination` (0 if nothing to withdraw)
     ///
     /// # Authorization
-    /// - Requires authorization from the stream's recipient (only recipient can withdraw)
+    /// - Requires authorization from the stream's `recipient` — the destination address is
+    ///   not required to authorize. Only the stream's recipient may redirect funds.
     ///
-    /// # Validation
-    /// - `destination` must not be the contract address (tokens must leave the contract)
+    /// # Destination Constraints
+    /// - `destination` must not equal `env.current_contract_address()`. Sending tokens back
+    ///   to the contract would lock them permanently with no recovery path.
+    /// - `destination` may equal the stream's `recipient` (self-redirect is allowed).
+    /// - `destination` may be any other valid Stellar account or contract address.
+    ///
+    /// # Zero Withdrawable Behavior
+    /// - If `accrued == withdrawn_amount` (nothing new to withdraw), returns 0 immediately.
+    /// - No token transfer occurs, no state change, no event published.
+    /// - This is idempotent: safe to call multiple times without side effects.
+    /// - Occurs before cliff time or when all accrued funds have already been withdrawn.
+    ///
+    /// # State Changes
+    /// - Updates `withdrawn_amount` by the amount transferred (only if withdrawable > 0).
+    /// - Sets `status` to `Completed` if `withdrawn_amount` reaches `deposit_amount`.
+    /// - Extends stream storage TTL to prevent expiration.
+    ///
+    /// # Events
+    /// - Publishes `("wdraw_to", stream_id)` → `WithdrawalTo { stream_id, recipient, destination, amount }`
+    ///   when `amount > 0`. The `recipient` field records who authorized the call; `destination`
+    ///   records where tokens were sent — both are required for audit trails.
+    /// - Publishes `("completed", stream_id)` → `StreamEvent::StreamCompleted(stream_id)`
+    ///   immediately after the `WithdrawalTo` event if the stream is now fully drained.
+    ///   Indexers must handle both events appearing in the same transaction.
     ///
     /// # Panics
-    /// - If the stream is `Completed` or `Paused`
-    /// - If the stream does not exist or caller is not the recipient
-    /// - If `destination` is the contract address
+    /// - `"destination must not be the contract"` — if `destination == current_contract_address()`
+    /// - `"stream already completed"` — if stream status is `Completed`
+    /// - `"cannot withdraw from paused stream"` — if stream status is `Paused`
+    /// - If the stream does not exist (`StreamNotFound`)
+    /// - If caller is not the stream's recipient (auth failure)
+    ///
+    /// # Usage Notes
+    /// - Works on `Active` and `Cancelled` streams (same as `withdraw`).
+    /// - For cancelled streams, only the accrued-but-not-yet-withdrawn amount is available;
+    ///   the unstreamed refund was already returned to the sender at cancellation time.
+    /// - CEI ordering: state is saved before the external token transfer to reduce reentrancy risk.
     pub fn withdraw_to(
         env: Env,
         stream_id: u64,

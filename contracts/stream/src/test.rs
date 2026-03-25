@@ -9,7 +9,7 @@ use soroban_sdk::{
 
 use crate::{
     ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, StreamCreated,
-    StreamEvent, StreamStatus,
+    StreamEvent, StreamStatus, WithdrawalTo,
 };
 
 // ---------------------------------------------------------------------------
@@ -8800,6 +8800,247 @@ fn test_recipient_stream_index_multiple_senders() {
 }
 
 // ---------------------------------------------------------------------------
+// Tests — withdraw_to: destination constraints and event parity (#265)
+// ---------------------------------------------------------------------------
+
+/// WithdrawalTo event is emitted with the correct payload (stream_id, recipient,
+/// destination, amount). Indexers rely on this exact shape.
+#[test]
+fn test_withdraw_to_emits_withdrawal_to_event() {
+    use soroban_sdk::testutils::Events;
+    use soroban_sdk::{symbol_short, IntoVal};
+
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let destination = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(600);
+    let amount = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(amount, 600);
+
+    let events = ctx.env.events().all();
+    let wdraw_event = events.iter().find(|(_, topics, _)| {
+        topics
+            == &soroban_sdk::vec![
+                &ctx.env,
+                symbol_short!("wdraw_to").into_val(&ctx.env),
+                stream_id.into_val(&ctx.env),
+            ]
+    });
+    assert!(wdraw_event.is_some(), "wdraw_to event must be emitted");
+
+    let (_, _, data) = wdraw_event.unwrap();
+    let payload = WithdrawalTo::try_from_val(&ctx.env, &data)
+        .expect("event data must deserialize as WithdrawalTo");
+    assert_eq!(payload.stream_id, stream_id);
+    assert_eq!(payload.recipient, ctx.recipient);
+    assert_eq!(payload.destination, destination);
+    assert_eq!(payload.amount, 600);
+}
+
+/// When withdraw_to drains the stream, a StreamCompleted event must follow the
+/// WithdrawalTo event in the same transaction — same parity as withdraw().
+#[test]
+fn test_withdraw_to_emits_completed_event_on_full_drain() {
+    use soroban_sdk::testutils::Events;
+    use soroban_sdk::{symbol_short, IntoVal};
+
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let destination = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(1000);
+    let amount = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(amount, 1000);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Completed);
+
+    let events = ctx.env.events().all();
+    let completed_event = events.iter().find(|(_, topics, _)| {
+        topics
+            == &soroban_sdk::vec![
+                &ctx.env,
+                symbol_short!("completed").into_val(&ctx.env),
+                stream_id.into_val(&ctx.env),
+            ]
+    });
+    assert!(
+        completed_event.is_some(),
+        "completed event must be emitted when withdraw_to drains the stream"
+    );
+}
+
+/// No event is emitted when withdraw_to returns 0 (before cliff / nothing accrued).
+/// This matches the zero-withdrawable behavior of withdraw().
+#[test]
+fn test_withdraw_to_no_event_when_zero() {
+    use soroban_sdk::testutils::Events;
+    use soroban_sdk::{symbol_short, IntoVal};
+
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_cliff_stream(); // cliff at 500
+    let destination = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(100); // before cliff
+    let amount = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(amount, 0);
+
+    let events = ctx.env.events().all();
+    let wdraw_event = events.iter().find(|(_, topics, _)| {
+        topics
+            == &soroban_sdk::vec![
+                &ctx.env,
+                symbol_short!("wdraw_to").into_val(&ctx.env),
+                stream_id.into_val(&ctx.env),
+            ]
+    });
+    assert!(
+        wdraw_event.is_none(),
+        "wdraw_to event must NOT be emitted when withdrawable is 0"
+    );
+}
+
+/// destination == recipient is explicitly allowed (self-redirect).
+/// Tokens land at the recipient address; state is updated correctly.
+#[test]
+fn test_withdraw_to_destination_equals_recipient_is_allowed() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+
+    ctx.env.ledger().set_timestamp(500);
+    let amount = ctx.client().withdraw_to(&stream_id, &ctx.recipient);
+
+    assert_eq!(amount, 500);
+    assert_eq!(ctx.token().balance(&ctx.recipient), 500);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 500);
+}
+
+/// withdraw_to on a cancelled stream delivers the accrued-but-not-withdrawn amount
+/// to the destination, matching the behaviour of withdraw() on cancelled streams.
+#[test]
+fn test_withdraw_to_on_cancelled_stream_delivers_accrued() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let destination = Address::generate(&ctx.env);
+
+    // Cancel at t=400: 400 tokens accrued, 600 refunded to sender
+    ctx.env.ledger().set_timestamp(400);
+    ctx.client().cancel_stream(&stream_id);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Cancelled);
+    assert_eq!(state.withdrawn_amount, 0);
+
+    // Recipient redirects their accrued share to a cold wallet
+    let amount = ctx.client().withdraw_to(&stream_id, &destination);
+
+    assert_eq!(
+        amount, 400,
+        "accrued amount must be delivered to destination"
+    );
+    assert_eq!(ctx.token().balance(&destination), 400);
+    assert_eq!(ctx.token().balance(&ctx.recipient), 0);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 400);
+}
+
+/// withdraw_to on a cancelled stream emits the WithdrawalTo event with the correct payload.
+#[test]
+fn test_withdraw_to_on_cancelled_stream_emits_event() {
+    use soroban_sdk::testutils::Events;
+    use soroban_sdk::{symbol_short, IntoVal};
+
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let destination = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(300);
+    ctx.client().cancel_stream(&stream_id);
+
+    let amount = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(amount, 300);
+
+    let events = ctx.env.events().all();
+    let wdraw_event = events.iter().find(|(_, topics, _)| {
+        topics
+            == &soroban_sdk::vec![
+                &ctx.env,
+                symbol_short!("wdraw_to").into_val(&ctx.env),
+                stream_id.into_val(&ctx.env),
+            ]
+    });
+    assert!(
+        wdraw_event.is_some(),
+        "wdraw_to event must be emitted for cancelled stream withdrawal"
+    );
+    let (_, _, data) = wdraw_event.unwrap();
+    let payload = WithdrawalTo::try_from_val(&ctx.env, &data).unwrap();
+    assert_eq!(payload.amount, 300);
+    assert_eq!(payload.destination, destination);
+}
+
+/// withdraw_to panics on a completed stream — same guard as withdraw().
+#[test]
+#[should_panic(expected = "stream already completed")]
+fn test_withdraw_to_panics_on_completed_stream() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let destination = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(1000);
+    ctx.client().withdraw(&stream_id);
+
+    ctx.client().withdraw_to(&stream_id, &destination);
+}
+
+/// withdraw_to panics on a paused stream — same guard as withdraw().
+#[test]
+#[should_panic(expected = "cannot withdraw from paused stream")]
+fn test_withdraw_to_panics_on_paused_stream() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let destination = Address::generate(&ctx.env);
+
+    ctx.env.ledger().set_timestamp(200);
+    ctx.client().pause_stream(&stream_id);
+
+    ctx.client().withdraw_to(&stream_id, &destination);
+}
+
+/// Interleaving withdraw and withdraw_to on the same stream never double-pays.
+/// withdrawn_amount is the single source of truth for both paths.
+#[test]
+fn test_withdraw_and_withdraw_to_interleaved_no_double_pay() {
+    let ctx = TestContext::setup();
+    let stream_id = ctx.create_default_stream();
+    let destination = Address::generate(&ctx.env);
+
+    // t=200: withdraw normally → recipient gets 200
+    ctx.env.ledger().set_timestamp(200);
+    let a1 = ctx.client().withdraw(&stream_id);
+    assert_eq!(a1, 200);
+
+    // t=500: withdraw_to → destination gets 300 (500 - 200 already withdrawn)
+    ctx.env.ledger().set_timestamp(500);
+    let a2 = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(a2, 300);
+
+    // t=1000: withdraw_to again → destination gets remaining 500
+    ctx.env.ledger().set_timestamp(1000);
+    let a3 = ctx.client().withdraw_to(&stream_id, &destination);
+    assert_eq!(a3, 500);
+
+    assert_eq!(ctx.token().balance(&ctx.recipient), 200);
+    assert_eq!(ctx.token().balance(&destination), 800);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.withdrawn_amount, 1000);
+    assert_eq!(state.status, StreamStatus::Completed);
+}
+
 // Tests — Issue #252: create_stream deposit, rate, and schedule validation matrix
 // ---------------------------------------------------------------------------
 
